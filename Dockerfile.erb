@@ -1,68 +1,21 @@
 # encoding: UTF-8
 
-FROM <%= ENV.fetch('FROM') %>
+FROM <%= ENV.fetch('FROM') %>:<%= ENV.fetch('TAG') %>
 MAINTAINER The Blue Beluga <admin@bluebeluga.io>
 
-LABEL name="ruby"
-LABEL description="Alpine Linux Base with Ruby"
-LABEL version="<%= ENV.fetch('RUBY_VERSION') %>"
-LABEL git_revision="<%= ENV.fetch('GIT_REVISION') %>"
+LABEL vendor="The Blue Beluga Company"
+LABEL io.bluebeluga.ruby.description="Ruby on Alpine Linux"
+LABEL io.bluebeluga.ruby.version="<%= ENV.fetch('TAG') %>"
+LABEL io.bluebeluga.ruby.git-revision="<%= ENV.fetch('GIT_REVISION') %>"
+LABEL io.bluebeluga.ruby.release-date="<%= Time.now.strftime('%B %d, %Y %H:%M') %>"
 
-ENV RUBY_MAJOR <%= ENV.fetch('RUBY_MAJOR') %>
-ENV RUBY_VERSION <%= ENV.fetch('RUBY_VERSION') %>
-ENV RUBY_SHA256 <%= ENV.fetch('RUBY_SHA256') %>
+RUN apk-install ruby ruby-irb ruby-bigdecimal ruby-io-console ruby-json \
+                tzdata ca-certificates libssl1.0 openssl libstdc++
 
-RUN mkdir -p /usr/local/etc && \
-    { \
+RUN { \
 		echo 'install: --no-rdoc --no-ri'; \
 		echo 'update: --no-rdoc --no-ri'; \
-	  } >> /usr/local/etc/gemrc
-
-RUN set -ex && \
-    apk-install --no-cache --virtual .ruby-builddeps autoconf bison bzip2 \
-    bzip2-dev ca-certificates coreutils curl gcc gdbm-dev glib-dev libc-dev \
-    libffi-dev libxml2-dev libxslt-dev linux-headers make ncurses-dev \
-    openssl-dev procps readline-dev ruby yaml-dev zlib-dev tzdata && \
-    curl -sSLO "http://cache.ruby-lang.org/pub/ruby/$RUBY_MAJOR/ruby-$RUBY_VERSION.tar.gz" && \
-    echo "$RUBY_SHA256  ruby-$RUBY_VERSION.tar.gz" | sha256sum -c - && \
-    mkdir -p /usr/src && \
-    tar -xzf "ruby-$RUBY_VERSION.tar.gz" -C /usr/src && \
-    mv "/usr/src/ruby-$RUBY_VERSION" /usr/src/ruby && \
-    rm "ruby-$RUBY_VERSION.tar.gz" && \
-    cd /usr/src/ruby && \
-    { echo '#define ENABLE_PATH_CHECK 0'; echo; cat file.c; } > file.c.new && \
-    mv file.c.new file.c && \
-    autoconf && \
-    ac_cv_func_isnan=yes ac_cv_func_isinf=yes && \
-		./configure --disable-install-doc && \
-    make -j"$(getconf _NPROCESSORS_ONLN)" && \
-    make install && \
-    runDeps="$( \
-		scanelf --needed --nobanner --recursive /usr/local \
-			| awk '{ gsub(/,/, "\nso:", $2); print "so:" $2 }' \
-			| sort -u \
-			| xargs -r apk info --installed \
-			| sort -u \
-	  )" && \
-    apk-install --virtual .ruby-rundeps $runDeps bzip2 ca-certificates curl \
-    libffi-dev openssl-dev yaml-dev procps zlib-dev && \
-    apk del .ruby-builddeps && \
-    rm -r /usr/src/ruby
-
-ENV RUBYGEMS_VERSION <%= ENV.fetch('RUBYGEMS_VERSION') %>
-RUN gem update --system $RUBYGEMS_VERSION
-
-ENV BUNDLER_VERSION <%= ENV.fetch('BUNDLER_VERSION') %>
-RUN gem install bundler --version "$BUNDLER_VERSION" && \
-    gem install pry
-
-ENV GEM_HOME /usr/local/bundle
-ENV BUNDLE_PATH="$GEM_HOME" \
-    BUNDLE_BIN="$GEM_HOME/bin" \
-    BUNDLE_SILENCE_ROOT_WARNING=1 \
-	  BUNDLE_APP_CONFIG="$GEM_HOME"
-ENV PATH $BUNDLE_BIN:$PATH
-RUN mkdir -p "$GEM_HOME" "$BUNDLE_BIN" \
- && chmod 777 "$GEM_HOME" "$BUNDLE_BIN"
+	  } >> /etc/gemrc \
+ && gem install bundler
 
 CMD [ "pry" ]
