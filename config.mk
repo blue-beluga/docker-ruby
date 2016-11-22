@@ -1,9 +1,10 @@
 # encoding: UTF-8
 
-GIT_REVISION=$(shell git rev-parse --short HEAD)
+export FROM_REGISTRY=docker.io
+export FROM_REPOSITORY=bluebeluga/alpine
+export FROM_TAG=3.4
 
-REGISTRY = docker.io
-FROM = bluebeluga/alpine
-REPOSITORY = bluebeluga/ruby
+REGISTRY=docker.io
+REPOSITORY=bluebeluga/ruby
 
-PUSH_REGISTRIES = $(REGISTRY)
+PUSH_REGISTRIES=$(REGISTRY)

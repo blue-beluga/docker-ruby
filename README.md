@@ -1,8 +1,6 @@
 
 # [<img src=".bluebeluga.png" height="100" width="200" style="border-radius: 50%;" alt="@fancyremarker" />](https://github.com/blue-beluga/docker-ruby) bluebeluga/ruby
 
-[![Circle CI](http://circle.bluebeluga.io/gh/blue-beluga/docker-ruby.svg?style=svg)](http://circle.bluebeluga.io/gh/blue-beluga/docker-ruby)
-
 The Ruby programming language, on Docker.
 
 ## Installation and Usage

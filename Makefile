@@ -1,7 +1,13 @@
 # encoding: UTF-8
+SHELL := /bin/bash -euo pipefail
 
 # Determines whether the output is in color or not. To disable, set this to 0.
 USE_COLOR = 1
+
+ifdef DEBUG
+  this_file := $(lastword $(MAKEFILE_LIST))
+  $(warning $(this_file))
+endif
 
 ifeq ($(CURDIR),)
   CURDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -11,13 +17,69 @@ ifndef PLATFORM
   PLATFORM := $(shell uname | tr A-Z a-z)
 endif
 
+# Colors
+ifneq ($(USE_COLOR),0)
+  RED      = \033[0;31m
+  GREEN    = \033[0;32m
+  YELLOW   = \033[0;33m
+  BLUE     = \033[0;34m
+  MAGENTA  = \033[0;35m
+  CYAN     = \033[0;36m
+  NO_COLOR = \033[0m
+endif
+
+# Get the latest commit.
+GIT_COMMIT = $(strip $(shell git rev-parse --short HEAD))
+
+# Get the version number from the code.
+VERSION = $(strip $(shell cat VERSION))
+ifndef VERSION
+	$(error You need to create a VERSION file to build a release)
+endif
+
+# Use the version number as the release tag.
+TAG = $(VERSION)
+
+# Detect if we are in a CI pipeline, if so skip checking the working directory.
+ifneq ($(CI), $(CIRCLECI))
+  TAG_OPTIONS = -f
+  # Find out if the working directory is clean.
+  GIT_NOT_CLEAN_CHECK = $(shell git status --porcelain)
+
+ifneq (x$(GIT_NOT_CLEAN_CHECK), x)
+  TAG_SUFFIX = -$(GIT_COMMIT)-dirty
+endif
+
+# If we're pusing to the registry, and we're going to mark it with the latest
+# tag, it should exactly match a version release.
+ifeq ($(MAKECMDGOALS), push)
+  # See what commit is tagged to match the version.
+  VERSION_COMMIT = $(strip $(shell git rev-list $(TAG) -n 1 | cut -c1-7))
+
+ifneq ($(VERSION_COMMIT), $(GIT_COMMIT))
+  $(error You are trying to push a build based on commit '$(GIT_COMMIT)' \
+  but the tagged release version is '$(VERSION_COMMIT)')
+endif
+
+# Don't push to Docker Hub if this isn't a clean repo.
+ifneq (x$(GIT_NOT_CLEAN_CHECK), x)
+  $(error You are trying to release a build based on a dirty repo)
+endif
+
+else
+  # Add the commit ref for development builds. Mark as dirty if the working
+  # directory isn't clean.
+  TAG = $(VERSION)$(TAG_SUFFIX)
+endif # ifeq ($(MAKECMDGOALS), push)
+endif # ifneq ($(CI), $(CIRCLECI))
+
 # Load the latest tag, and set a default for TAG. The goal here is to ensure
 # TAG is set as early possible, considering it's usually provided as an input
 # anyway, but we want running "make" to *just work*.
 include latest.mk
 
 ifndef LATEST_TAG
-	$(error LATEST_TAG *must* be set in latest.mk)
+  $(error The LATEST_TAG *must* be set in latest.mk)
 endif
 
 ifeq "$(TAG)" "latest"
@@ -34,18 +96,18 @@ TAG ?= $(LATEST_TAG)
 include config.mk
 
 ifndef REGISTRY
-	$(error REGISTRY *must* be set in config.mk)
+  $(error The REGISTRY *must* be set in config.mk)
 endif
 
 ifndef REPOSITORY
-	$(error REPOSITORY *must* be set in config.mk)
+  $(error The REPOSITORY *must* be set in config.mk)
 endif
 
 # Create $(TAG)/config.mk if you need to e.g. set environment variables
 # depending on the tag being built. This is typically useful for things
 # constants like a point version, a sha1sum, etc. (note that $(TAG)/config.mk
 # is entirely optional).
--include versions/$(TAG)/config.mk
+-include versions/$(VERSION)/config.mk
 
 # By default, we'll push the tag we're building, and the 'latest' tag if said
 # tag is indeed the latest one. Set PUSH_TAGS in config.mk (or $(TAG)/config.mk)
@@ -62,115 +124,142 @@ PUSH_REGISTRIES ?= $(REGISTRY)
 
 # Export what we're building for e.g. test scripts to use. Exporting other
 # variables is the responsibility of config.mk and $(TAG)/config.mk.
-export GIT_REVISION := $(shell git rev-parse --short HEAD)
 export REPOSITORY
 export REGISTRY
-export FROM
 export TAG
 
-ifneq ($(USE_COLOR),0)
-  YL = \033[0;33m
-  GR = \033[0;32m
-  RD = \033[0;31m
-  MG = \033[0;35m
-  CY = \033[0;36m
-  NC = \033[0m
+DOCKERFILE = versions/$(VERSION)/Dockerfile
+BUILD_ID = versions/$(VERSION)/.build_id
+
+define banner
+	@printf "$(YELLOW)---------------------------------------------------------\n"
+	@printf "$(CYAN)%13s: $(GREEN)%-15s\n" "Repository" "$(REPOSITORY)"
+	@printf "$(CYAN)%13s: $(GREEN)%-15s\n" "Build Tags" "$(PUSH_TAGS)"
+	@printf "$(CYAN)%13s: $(GREEN)%-15s\n" "Registries" "$(REGISTRY)"
+	@printf "$(YELLOW)---------------------------------------------------------\n"
+endef
+
+define say
+  @printf "\n$(CYAN)$(1): $(YELLOW)$(2)$(NO_COLOR)\n"
+endef
+
+# ******************************************************************************
+# The rule that occurs first in the makefile is the default.
+# By default, we want to build everything.
+#
+# Calling `make` will invoque the `all` rule.
+# `all` depends on `build` by convention.
+all : deps build test push publish
+
+# Print out a header.
+banner:
+	$(call banner)
+
+deps: banner
+	$(call say,Pulling Image,$(FROM_REGISTRY)/$(FROM_REPOSITORY):$(FROM_TAG))
+	@docker pull $(FROM_REGISTRY)/$(FROM_REPOSITORY):$(FROM_TAG)
+	$(call say,Pulling Image,$(REGISTRY)/$(REPOSITORY):$(TAG))
+	@docker pull $(REGISTRY)/$(REPOSITORY):$(TAG)
+
+# `build` depends on `.build`, that rule is a bit particular as it actually
+# represent a file on disc. It is used as placeholder to know if we need to
+# redo the build. In a “regular” Makefile scenario, we would have source file
+# instead.
+build: banner $(DOCKERFILE) .build
+
+# If `.build` exists and didn’t change (mtime), then do nothing, otherwise,
+# executre the rule.
+#
+# `.build` depends on `.`, meaning that if anything (mtime) changes in the
+# local  directory, the rule will be reexecuted (upon next `make` call).
+#
+# The `.build` rule, when finish creates the `.build` file. So next time
+# make is called, nothing will happen unless something changed within the
+# directory.
+.build: . deps
+	$(call say,Building image,$(REGISTRY)/$(REPOSITORY):$(TAG))
+	@docker build --build-arg BUILD_DATE=`date -u +"%Y-%m-%dT%H:%M:%SZ"` \
+								--build-arg VERSION=$(TAG) \
+								--build-arg VCS_URL=`git config --get remote.origin.url` \
+								--build-arg VCS_REF=$(GIT_COMMIT) \
+								--tag	$(REGISTRY)/$(REPOSITORY):$(TAG) \
+								--file $(DOCKERFILE) .
+	@docker inspect --format '{{.Id}}' \
+                             $(REGISTRY)/$(REPOSITORY):$(TAG) > $(BUILD_ID)
+ifeq "$(TAG)" "$(LATEST_TAG)"
+	@docker tag $(TAG_OPTIONS) $(REGISTRY)/$(REPOSITORY):$(TAG) \
+                             $(REGISTRY)/$(REPOSITORY):latest
 endif
 
-HELP_FMT := 'make $(YL)%-15s $(NC)\# %s\n'
+test: banner
+	$(call say,Testing image,$(REGISTRY)/$(REPOSITORY):$(TAG))
+	@bin/test
 
-# Provide a way to shorten build arguments below.
-IMAGE_NAME = $(REPOSITORY):$(TAG)
-REPO = $(REPOSITORY)
-REG  = $(REGISTRY)
-#
-# ******************************************************************************
-# Define the actual usable targets.
-#
-help::
-	@printf $(HELP_FMT) 'task' 'Shows the current task info.'
-task::
-	@printf "$(YL)-----------------------------------------------------------\n"
-	@printf "$(CY)%14s $(YL): $(GR)%-15s $(CY)%8s $(YL): $(GR)%-14s\n" \
-							"Repository" $(REPOSITORY) "Tag" $(TAG)
-	@printf "$(CY)%14s $(YL): $(GR)%-15s $(CY)%8s $(YL): $(GR)%-14s\n" \
-							"Registry" $(REGISTRY) "Target" $(MAKECMDGOALS)
-	@printf "$(YL)-----------------------------------------------------------\n"
-.PHONY:: task
+docker_login:
+	$(call say,Docker login,https://index.docker.io)
+	@bin/login
 
-help::
-	@printf $(HELP_FMT) 'push' 'Push image or a repository to the registry'
-push:: task build test
-	for registry in $(PUSH_REGISTRIES); do \
+push: banner docker_login
+	@for registry in $(PUSH_REGISTRIES); do \
 		for tag in $(PUSH_TAGS); do \
-			docker tag "$(REG)/$(REPO):$(TAG)" "$${registry}/$(REPO):$${tag}"; \
-			docker push "$${registry}/$(REPO):$${tag}"; \
+			printf "\n$(CYAN)Pushing image: "; \
+			printf "$(YELLOW)$${registry}/$(REPOSITORY):$${tag}$(NO_COLOR)\n"; \
+			docker tag $(TAG_OPTIONS) $(REGISTRY)/$(REPOSITORY):$(TAG) \
+                 $${registry}/$(REPOSITORY):$${tag}; \
+			docker push $${registry}/$(REPOSITORY):$${tag}; \
 		done \
 	done
-.PHONY:: push
 
-help::
-	printf $(HELP_FMT) 'test' 'Run automated tests on one or more instances'
-test:: task build
-	set -e; if [ -f 'test/run.bats' ]; then bats -t test/run.bats; break; fi
-.PHONY:: test
+docs:
+	$(call say,Render docs,http://localhost:8000)
+	@docker run --rm -p 8000:8000 -v $PWD:/work bluebeluga/mkdocs mkdocs serve
 
-help::
-	printf $(HELP_FMT) 'build' 'Build an image from a Dockerfile'
-build:: task stop .render .build
-.PHONY:: build .build
-
-.build:: . $(DEPS)
-	docker pull $(FROM)
-	docker build -t "$(REG)/$(REPO):$(TAG)" -f "versions/$(TAG)/Dockerfile" .
-	docker inspect -f '{{.Id}}' $(REG)/$(REPO):$(TAG) > "versions/$(TAG)/.build"
-ifeq "$(TAG)" "$(LATEST_TAG)"
-	docker tag "$(REG)/$(REPO):$(TAG)" "$(REG)/$(REPO):latest"
+publish:
+ifneq ($(CI), $(CIRCLECI))
+	$(call say,Publish docs,http://blue-beluga.github.io/docker-alpine/latest)
+  @eval $(docker run bluebeluga/mkdocs circleci-cmd)
 endif
 
-help::
-	printf $(HELP_FMT) 'stop' 'Gracefully stop a running container'
-stop:: task
-ifneq ($(strip $(shell docker ps -aqf ancestor=$(IMAGE_NAME))),)
-	docker ps -aqf ancestor=$(IMAGE_NAME) | xargs docker stop
-endif
-.PHONY:: stop
+clean: banner
+	$(call say,Cleaning image,$(REGISTRY)/$(REPOSITORY):$(TAG))
+	@rm -f versions/*/Dockerfile \
+				 versions/*/.build_id \
+				 versions/*/$(REPOSITORY)-*.tar
+	@docker images -qa $(REPOSITORY):$(TAG) | xargs docker rmi -f
+	@docker images -qa $(REPOSITORY):latest | xargs docker rmi -f
 
-help::
-	printf $(HELP_FMT) 'clean' 'Stop and remove build artifacts and images'
-clean:: task stop
-	rm -f .render .build Dockerfile
-	docker images -qa "$(REPO):$(TAG)" | xargs docker rmi -f
-	docker images -qa "$(REPO):latest" | xargs docker rmi -f
-
-# Per-tag Dockerfile target. Look for Dockerfile or Dockerfile.erb in the root,
-# and use it for $(TAG). We prioritize Dockerfile.erb over Dockerfile if both
-# are present.
-.render: $(TAG) Dockerfile.erb Dockerfile
-ifneq (,$(wildcard Dockerfile.erb))
-	erb "Dockerfile.erb" > "versions/$(TAG)/Dockerfile"
+# Per-tag Dockerfile target. Look for Dockerfile or Dockerfile.tmpl in the root,
+# and use it for $(TAG). We prioritize Dockerfile.tmpl over Dockerfile if
+# both are present.
+versions/$(TAG)/Dockerfile: Dockerfile.tmpl Dockerfile | $(TAG)
+ifneq (,$(wildcard Dockerfile.tmpl))
+	@from=$(FROM_REGISTRY)/$(FROM_REPOSITORY):$(FROM_TAG) \
+    bin/render Dockerfile.tmpl > $(DOCKERFILE)
 else
-	cp "Dockerfile" > "versions/$(TAG)/Dockerfile"
+	@cp Dockerfile > $(DOCKERFILE)
 endif
 
-# Pseudo targets for Dockerfile and Dockerfile.erb. They don't technically
+# Pseudo targets for Dockerfile and Dockerfile.tmpl. They don't technically
 # create anything, but each warn if the other file is missing (meaning both
 # files are missing).
-Dockerfile.erb:
-ifneq (,$(wildcard Dockerfile.erb))
-	$(warning You must create a Dockerfile.erb or Dockerfile)
+Dockerfile.tmpl:
+ifneq (,$(wildcard Dockerfile.tmpl))
+	$(warning You must create a 'Dockerfile.tmpl' or 'Dockerfile')
 endif
 
 Dockerfile:
 ifneq (,$(wildcard Dockerfile))
-	$(warning You must create a Dockerfile.erb or Dockerfile)
+	$(warning You must create a 'Dockerfile.tmpl' or 'Dockerfile')
 endif
 
 $(TAG):
-	mkdir -p "versions/$(TAG)"
+	@mkdir -p versions/$(VERSION)
 
-# list of dependancies in the build context
-DEPS = $(shell find versions/$(TAG) -type f -print)
+# We don't want `make` to get confused if a file named `all` should happen to
+# exist, so we say that `all` is a `PHONY` target, i.e., a target that `make`
+# should always try to update. We do that by making all a dependency of the
+# special target `.PHONY`:
+.PHONY : all banner deps build .build test docker_login push clean docs publish
 
-.PHONY:: push test build stop
-.DEFAULT_GOAL := test
+# Calling `make` will invoque the `all` rule.
+.DEFAULT_GOAL := all
